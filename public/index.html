@@ -4533,7 +4533,14 @@ const Input = (() => {
     window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
     // iPad/iPhone: without this Safari treats a finger on the game as page scrolling and cancels the joystick right away
     for (const t of ['touchstart', 'touchmove']) cv.addEventListener(t, e => { if (e.cancelable) e.preventDefault(); }, { passive: false });
+    // the joystick also follows the finger through touch events: some iPads stop sending pointer moves or cancel them
+    const joyTo = q => { let dx = q.x - joy.sx, dy = q.y - joy.sy; const d = Math.hypot(dx, dy), m = 46; if (d > m) { dx *= m / d; dy *= m / d; } joy.dx = dx / m; joy.dy = dy / m; knob.style.transform = 'translate(' + dx + 'px,' + dy + 'px)'; };
+    cv.addEventListener('touchstart', e => { if (joy.tid !== undefined || joy.id < 0) { if (joy.id < 0) return; } for (const t of e.changedTouches) { const q = loc(t); if (joy.tid === undefined && Math.hypot(q.x - joy.sx, q.y - joy.sy) < 40) joy.tid = t.identifier; } }, { passive: true });
+    cv.addEventListener('touchmove', e => { if (joy.id >= 0 && joy.tid === undefined) { let best = 1e9; for (const t of e.touches) { const q = loc(t), d = Math.hypot(q.x - joy.sx, q.y - joy.sy); if (d < best && d < 160) { best = d; joy.tid = t.identifier; } } } if (joy.tid === undefined) return; for (const t of e.changedTouches) if (t.identifier === joy.tid) { ev.tmove = (ev.tmove || 0) + 1; joyTo(loc(t)); } }, { passive: true });
+    const tEnd = e => { if (joy.tid === undefined) return; for (const t of e.changedTouches) if (t.identifier === joy.tid) { joy.tid = undefined; joy.id = -1; joy.dx = joy.dy = 0; joyEl.style.display = 'none'; } };
+    cv.addEventListener('touchend', tEnd); cv.addEventListener('touchcancel', tEnd);
     document.addEventListener('gesturestart', e => e.preventDefault());
+    cv.addEventListener('pointerdown', () => { ev.down++; }); cv.addEventListener('pointermove', () => { ev.move++; });
     cv.addEventListener('pointerdown', e => {
       Sfx.init(); if (UI.emoOpen) UI.emoteWheel(false); if (UI.modal) return; const q = loc(e), ar = turned.matches ? { left: 0, top: 0 } : UI.el.app.getBoundingClientRect();
       if (e.pointerType === 'touch') { setTouch(); if (joy.id < 0 && q.x - ar.left < cv.clientWidth * 0.42) { joy.id = e.pointerId; joy.sx = q.x; joy.sy = q.y; joy.dx = joy.dy = 0; joyEl.style.display = 'block'; joyEl.style.left = (q.x - ar.left) + 'px'; joyEl.style.top = (q.y - ar.top) + 'px'; knob.style.transform = ''; } else look.set(e.pointerId, q); }
@@ -4541,13 +4548,13 @@ const Input = (() => {
       try { cv.setPointerCapture(e.pointerId); } catch (er) { /* ignore */ }
     });
     cv.addEventListener('pointermove', e => {
-      const q = loc(e); if (e.pointerId === joy.id) { let dx = q.x - joy.sx, dy = q.y - joy.sy; const d = Math.hypot(dx, dy), m = 46; if (d > m) { dx *= m / d; dy *= m / d; } joy.dx = dx / m; joy.dy = dy / m; knob.style.transform = 'translate(' + dx + 'px,' + dy + 'px)'; return; }
+      const q = loc(e); if (e.pointerId === joy.id) { joyTo(q); return; }
       const l = look.get(e.pointerId); if (!l) return;
       if (look.size >= 2) { l.x = q.x; l.y = q.y; const a = Array.from(look.values()), d = Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y); if (pinch && d > 1) G.cam.dist = clamp(G.cam.dist * pinch / d, 5, 38); pinch = d; return; }
       const s = (e.pointerType === 'touch' ? 0.0075 : 0.0052) * (G.P.set.sens || 1); G.cam.yaw -= (q.x - l.x) * s; G.cam.pitch = clamp(G.cam.pitch + (q.y - l.y) * s * 0.8, 0.08, 1.4); l.x = q.x; l.y = q.y; auto = null;
     });
-    const up = e => { if (e.pointerId === joy.id) { joy.id = -1; joy.dx = joy.dy = 0; joyEl.style.display = 'none'; } look.delete(e.pointerId); if (look.size < 2) pinch = 0; };
-    cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up); cv.addEventListener('lostpointercapture', up);
+    const up = e => { if (e.pointerId === joy.id && (e.type === 'pointerup' || joy.tid === undefined)) { joy.tid = undefined; joy.id = -1; joy.dx = joy.dy = 0; joyEl.style.display = 'none'; } look.delete(e.pointerId); if (look.size < 2) pinch = 0; };
+    cv.addEventListener('pointerup', e => { ev.up++; up(e); }); cv.addEventListener('pointercancel', e => { ev.cancel++; up(e); }); cv.addEventListener('lostpointercapture', e => { ev.lost++; up(e); });
     cv.addEventListener('wheel', e => { e.preventDefault(); G.cam.dist = clamp(G.cam.dist * (e.deltaY > 0 ? 1.1 : 0.9), 5, 38); auto = null; }, { passive: false });
     cv.addEventListener('contextmenu', e => e.preventDefault());
     $('jump').addEventListener('pointerdown', e => { e.preventDefault(); Sfx.init(); jumpQ = true; });
@@ -4581,7 +4588,11 @@ const Input = (() => {
     const c = Gfx.camera; c.position.set(cx, cyy, cz); c.lookAt(camT.x, camT.y, camT.z);
   }
   function snap() { camT.x = G.me.x; camT.y = G.me.y + 1.7; camT.z = G.me.z; }
-  return { emote, init, update, snap, nudge(pitch, dist) { auto = { pitch, dist, t: 1.4 }; } };
+  // ?debug=1: a small panel with what the touch controls receive (to find problems on phones and tablets)
+  const ev = { down: 0, move: 0, up: 0, cancel: 0, lost: 0 }; let dbgEl = null, fpsN = 0, fpsT = 0, fps = 0;
+  function debug(dt) { if (!dbgEl) { let on = false; try { on = new URLSearchParams(location.search).get('debug') === '1'; } catch (e) { /* ignore */ } if (!on) { dbgEl = false; return; } dbgEl = document.createElement('pre'); dbgEl.style.cssText = 'position:fixed;left:4px;top:40%;z-index:99;margin:0;padding:6px;background:#000c;color:#7dff9a;font:11px monospace;pointer-events:none;white-space:pre'; document.body.appendChild(dbgEl); }
+    if (!dbgEl) return; fpsN++; fpsT += dt; if (fpsT > 1) { fps = fpsN / fpsT; fpsN = 0; fpsT = 0; } const m = G.me; dbgEl.textContent = 'fps ' + fps.toFixed(0) + ' dt ' + dt.toFixed(3) + '\nscene ' + G.scene + ' modal ' + (UI.modal || '-') + ' hold ' + !!G.hold + ' touch ' + !!G.touch + '\njoy ' + joy.id + ' ' + joy.dx.toFixed(2) + ',' + joy.dy.toFixed(2) + '\nme ' + m.x.toFixed(1) + ',' + m.z.toFixed(1) + ' y ' + m.y.toFixed(1) + '\nptr d' + ev.down + ' m' + ev.move + ' u' + ev.up + ' c' + ev.cancel + ' l' + ev.lost + ' tm' + (ev.tmove || 0) + ' tid ' + joy.tid + '\n' + navigator.userAgent.slice(0, 60); }
+  return { emote, init, update, snap, debug, nudge(pitch, dist) { auto = { pitch, dist, t: 1.4 }; } };
 })();
 
 /* 90_main.js */
@@ -4639,7 +4650,7 @@ const Main = (() => {
     requestAnimationFrame(frame); const raw = (now - last) / 1000; last = now; if (G.scene === 'boot' || G.hold) return;
     if (raw > 3) Net.resumed(); const dt = clamp(raw || 0.016, 0.001, 0.05);
     // each part runs on its own: if one breaks, the others keep going and the error is shown once
-    guard('Spiel', () => step(dt)); guard('Grafik', render); UI.setActors(actors); guard('Anzeige', () => UI.frame(dt));
+    guard('Spiel', () => step(dt)); Input.debug(dt); guard('Grafik', render); UI.setActors(actors); guard('Anzeige', () => UI.frame(dt));
     fpsT += raw; fpsN++; if (fpsT >= 3) { const fps = fpsN / fpsT; fpsT = 0; fpsN = 0; if (G.P.set.quality === 'auto' && fps < 26 && !document.hidden) { if (++slow >= 2) { slow = 0; const c = G.qLevel; if (c !== 'low') { G.autoQ = c === 'high' ? 'mid' : 'low'; applyQuality(); } } } else slow = 0; }
   }
   function lockLandscape() {
