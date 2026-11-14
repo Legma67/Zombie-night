@@ -20,14 +20,18 @@ const log = (...a) => console.log(new Date().toISOString().slice(0, 19), ...a);
 const docs = new Map(); let owners = new Set(); const dirty = new Set(); let pg = null, fileDirty = false;
 const FILE = path.join(DATA_DIR, 'spiel-daten.json');
 async function loadStore() {
-  if (process.env.DATABASE_URL) {
-    const { Pool } = require('pg'); const local = /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL);
-    pg = new Pool({ connectionString: process.env.DATABASE_URL, ssl: local ? false : { rejectUnauthorized: false }, max: 4 });
+  // the database address, also when it was pasted with extras like  psql '...'  or  DATABASE_URL="..."
+  let url = String(process.env.DATABASE_URL || '').trim().replace(/^DATABASE_URL\s*=\s*/i, '').replace(/^psql\s+/i, '').replace(/^['"]|['"]$/g, '').trim();
+  if (url && !/^postgres(ql)?:\/\/[^@]+@[^/]+\//.test(url)) { log('ACHTUNG: DATABASE_URL sieht nicht wie eine Datenbank-Adresse aus (muss mit postgresql:// anfangen). Der Server speichert jetzt nur in eine Datei.'); url = ''; }
+  if (url) try {
+    const { Pool } = require('pg'); const local = /localhost|127\.0\.0\.1/.test(url);
+    pg = new Pool({ connectionString: url, ssl: local ? false : { rejectUnauthorized: false }, max: 4 });
     pg.on('error', e => log('Datenbank-Verbindung kurz weg (wird neu aufgebaut):', e.message)); // e.g. a free database that sleeps when idle
     await pg.query('create table if not exists zns_docs (path text primary key, data jsonb not null, t bigint not null)');
     const r = await pg.query('select path, data from zns_docs'); for (const row of r.rows) { if (row.path === '_owners') owners = new Set(row.data.list || []); else docs.set(row.path, row.data); }
-    log('Postgres verbunden,', docs.size, 'Einträge geladen');
-  } else {
+    log('Postgres verbunden,', docs.size, 'Einträge geladen'); return;
+  } catch (e) { log('ACHTUNG: Datenbank nicht erreichbar (' + e.message + '). Prüfe DATABASE_URL. Der Server läuft trotzdem und speichert so lange nur in eine Datei.'); try { await pg.end(); } catch (er) { /* ignore */ } pg = null; docs.clear(); }
+  {
     try { const j = JSON.parse(fs.readFileSync(FILE, 'utf8')); for (const k in j.docs || {}) docs.set(k, j.docs[k]); owners = new Set(j.owners || []); log('Datei geladen,', docs.size, 'Einträge'); }
     catch (e) { if (e.code !== 'ENOENT') log('Datei konnte nicht gelesen werden:', e.message); else log('Neue, leere Datenbank (Datei)'); }
   }
