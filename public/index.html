@@ -3659,16 +3659,16 @@ const Srv = (() => {
     const K = key(), A = adminWord(); let ws = null, open = false, uid = null, owner = false, me = null, wait = 1000, mine = {}, rid = 0, sidN = 0, welcomed = false;
     const peers = new Map(), peerH = [], connH = [], reqs = new Map(), subs = new Map(), readyQ = [];
     const sendRaw = m => { if (ws && ws.readyState === 1) { ws.send(JSON.stringify(m)); return true; } return false; };
-    const list = () => [{ peer: me, isMe: true, sameTab: true, kind: 'viewer', guest: false, presence: mine }].concat(Array.from(peers.values()));
+    const list = () => [{ peer: me, isMe: true, sameTab: true, kind: 'viewer', guest: false, presence: mine, updatedAt: Date.now() }].concat(Array.from(peers.values()));
     const notify = left => { const ps = list(); for (const h of peerH) try { h({ peers: ps, joined: [], left: left || [], updated: [] }); } catch (e) { console.error(e); } };
     const conn = v => { for (const h of connH) try { h(v); } catch (e) { /* ignore */ } };
     function connect() {
       try { ws = new WebSocket(U); } catch (e) { retry(); return; }
       ws.onopen = () => { ws.send(JSON.stringify({ t: 'hi', key: K, admin: A || undefined })); };
       ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch (er) { return; }
-        if (m.t === 'welcome') { open = true; wait = 1000; uid = m.uid; owner = !!m.owner; me = m.peer; peers.clear(); for (const p of m.peers || []) peers.set(p.peer, { peer: p.peer, isMe: false, sameTab: false, kind: 'viewer', guest: true, presence: p.p || {} });
+        if (m.t === 'welcome') { open = true; wait = 1000; uid = m.uid; owner = !!m.owner; me = m.peer; peers.clear(); for (const p of m.peers || []) peers.set(p.peer, { peer: p.peer, isMe: false, sameTab: false, kind: 'viewer', guest: true, presence: p.p || {}, updatedAt: Date.now() });
           if (Object.keys(mine).length) sendRaw({ t: 'p', d: mine }); for (const [sid, s] of subs) sendRaw({ t: 'sub', sid, coll: s.coll, order: s.order, lim: s.lim }); welcomed = true; while (readyQ.length) readyQ.shift()(); conn(true); notify(); return; }
-        if (m.t === 'pp') { peers.set(m.peer, { peer: m.peer, isMe: false, sameTab: false, kind: 'viewer', guest: true, presence: m.p || {} }); notify(); return; }
+        if (m.t === 'pp') { peers.set(m.peer, { peer: m.peer, isMe: false, sameTab: false, kind: 'viewer', guest: true, presence: m.p || {}, updatedAt: Date.now() }); notify(); return; }
         if (m.t === 'left') { const p = peers.get(m.peer); peers.delete(m.peer); notify(p ? [p] : []); return; }
         if (m.t === 'res') { const q = reqs.get(m.rid); if (!q) return; reqs.delete(m.rid); clearTimeout(q.tm); if (m.ok) q.ok(m); else q.no({ code: m.code || 'failed' }); return; }
         if (m.t === 'snap') { const s = subs.get(m.sid); if (s) try { s.cb({ docs: (m.docs || []).map(d => ({ id: d.id, data: () => d.d })) }); } catch (er) { console.error(er); } } };
