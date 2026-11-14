@@ -19,7 +19,7 @@ const { WebSocketServer } = require('ws');
 
 const PORT = +process.env.PORT || 8080, ADMIN = process.env.ADMIN_SECRET || '', DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const MAX_PLAYERS = +process.env.MAX_PLAYERS || 300, PER_IP = 8, PRESENCE_MAX = 4096, DOC_MAX = 4096, PROFILE_MAX = 256 * 1024;
-const BOOT = crypto.randomBytes(6).toString('hex'), START = Date.now(); let upd = 'start'; // 'start' = new version waits for the old one, 'stop' = old version hands over, null = open
+const BOOT = crypto.randomBytes(6).toString('hex'), START = Date.now(); let upd = 'start', how = ''; // 'start' = new version waits for the old one, 'stop' = old version hands over, null = open
 const log = (...a) => console.log(new Date().toISOString().slice(0, 19), ...a);
 
 /* ---------- storage: every document lives in memory and is written to Postgres or a file ---------- */
@@ -70,16 +70,16 @@ async function handOver(why) {
   if (pg) try { await sysSet('handoff', { boot: BOOT, t: Date.now() }); log('Übergabe an die neue Version fertig'); } catch (e) { log('Übergabe fehlgeschlagen:', e.message); }
 }
 async function startUp() {
-  if (!pg) { upd = null; return; }
+  if (!pg) { upd = null; how = 'datei'; return; }
   try {
     const alive = await sysGet('alive'), h0 = await sysGet('handoff'); await sysSet('deploy', { boot: BOOT, t: START });
-    if (!alive || alive.boot === BOOT || Date.now() - alive.t > 20000 || (h0 && h0.boot === alive.boot)) { upd = null; log('Keine ältere Version läuft, Spiel ist offen'); }
+    if (!alive || alive.boot === BOOT || Date.now() - alive.t > 20000 || (h0 && h0.boot === alive.boot)) { upd = null; how = 'frei'; log('Keine ältere Version läuft, Spiel ist offen'); }
     else log('Ältere Version läuft noch, warte auf ihre Übergabe ...');
   } catch (e) { upd = null; log('Update-Abstimmung fehlgeschlagen:', e.message); }
   setInterval(async () => { try {
     if (upd === 'start') { const h = await sysGet('handoff'), a = await sysGet('alive'), late = Date.now() - START > 90000; // never wait forever
       const gone = !a || Date.now() - a.t > 15000 || (h && h.boot === a.boot); // the old one handed over, or crashed
-      if (gone || late) { await reload(); upd = null; log(late ? 'Alte Version hat sich nicht gemeldet, starte trotzdem' : 'Daten übernommen, Spiel ist offen,', docs.size, 'Einträge'); } return; }
+      if (gone || late) { await reload(); upd = null; how = late ? 'zeit' : h && a && h.boot === a.boot ? 'übergabe' : 'alte weg'; log(late ? 'Alte Version hat sich nicht gemeldet, starte trotzdem' : 'Daten übernommen, Spiel ist offen,', docs.size, 'Einträge'); } return; }
     if (upd === 'stop') return;
     const d = await sysGet('deploy'); if (d && d.boot !== BOOT && d.t > START) { await handOver('Deploy'); return; }
     await sysSet('alive', { boot: BOOT, t: Date.now() });
@@ -108,7 +108,7 @@ function pageHtml() { if (!page) { const h = fs.readFileSync(PAGE, 'utf8'); page
 const FILES = { '/manifest.webmanifest': 'application/manifest+json', '/sw.js': 'text/javascript', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/icon-maskable.png': 'image/png', '/apple-touch-icon.png': 'image/png' };
 const server = http.createServer((req, res) => {
   const u = req.url.split('?')[0];
-  if (u === '/health') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok ' + clients.size + ' online' + (upd ? ' (Update: ' + upd + ')' : maintOn() ? ' (Wartung)' : '') + ' ' + BUILD); return; }
+  if (u === '/health') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok ' + clients.size + ' online' + (pg ? ' db' : ' datei') + (how ? ' start=' + how : '') + (upd ? ' (Update: ' + upd + ')' : maintOn() ? ' (Wartung)' : '') + ' ' + BUILD); return; }
   if (u === '/' || u === '/index.html') { try { const b = pageHtml(); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' }); res.end(b); } catch (e) { res.writeHead(500); res.end('Spiel-Datei fehlt (public/index.html)'); } return; }
   if (FILES[u]) { fs.readFile(path.join(__dirname, 'public', u.slice(1)), (e, b) => { if (e) { res.writeHead(404); res.end(); return; } res.writeHead(200, { 'content-type': FILES[u], 'cache-control': u === '/sw.js' ? 'no-cache' : 'public, max-age=86400' }); res.end(b); }); return; }
   res.writeHead(404, { 'content-type': 'text/plain' }); res.end('nicht gefunden');
