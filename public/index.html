@@ -979,7 +979,7 @@ const Save = {
     clearTimeout(this.timer); this.timer = setTimeout(() => this.flush(), 400);
   },
   // write right now (after a round, when the page closes or goes to the background)
-  flush() { clearTimeout(this.timer); this.timer = 0; let ok = false; try { localStorage.setItem(this.key, JSON.stringify(G.P)); ok = true; } catch (e) { /* storage blocked */ } try { if (this.cloud) this.cloud(); } catch (e) { /* ignore */ } this.last = Date.now(); this.ok = ok || !!this.cloud; return this.ok; },
+  flush() { clearTimeout(this.timer); this.timer = 0; if (this.off) return; let ok = false; try { localStorage.setItem(this.key, JSON.stringify(G.P)); ok = true; } catch (e) { /* storage blocked */ } try { if (this.cloud) this.cloud(); } catch (e) { /* ignore */ } this.last = Date.now(); this.ok = ok || !!this.cloud; return this.ok; },
   last: 0, ok: false
 };
 
@@ -3655,6 +3655,26 @@ const Srv = (() => {
   function key() { let k = null; try { k = localStorage.getItem('zns_key'); } catch (e) { /* ignore */ } if (!k || k.length < 16) { const a = new Uint8Array(18); crypto.getRandomValues(a); k = Array.from(a, b => b.toString(16).padStart(2, '0')).join(''); try { localStorage.setItem('zns_key', k); } catch (e) { /* ignore */ } } return k; }
   function adminWord() { try { const q = new URLSearchParams(location.search), a = q.get('admin'); if (a) { q.delete('admin'); const s = q.toString(); history.replaceState(null, '', location.pathname + (s ? '?' + s : '') + location.hash); } return a; } catch (e) { return null; } }
 
+  // accounts: the server gives a login token; it stays in this browser until the player logs out
+  const TOK = 'zns_tok'; let acc = null, accReq = null, accTok = null;
+  const getTok = () => { try { return localStorage.getItem(TOK); } catch (e) { return null; } }, setTok = t => { try { if (t) localStorage.setItem(TOK, t); else localStorage.removeItem(TOK); } catch (e) { /* ignore */ } };
+  const ERR = { taken: 'Diesen Namen gibt es schon.', bad_name: 'Name: 3 bis 16 Buchstaben oder Zahlen, ohne Leerzeichen.', bad_pw: 'Das Passwort braucht mindestens 6 Zeichen.', wrong: 'Name oder Passwort stimmt nicht.', too_many: 'Zu viele Versuche. Warte ein paar Minuten.', has_account: 'Zu diesem Spielstand gibt es schon ein Konto. Melde dich damit an.', offline: 'Keine Verbindung zum Server. Kurz warten und nochmal versuchen.', timeout: 'Der Server antwortet nicht. Nochmal versuchen.' };
+  function loginBox() {
+    if (document.getElementById('accBox')) return; const d = document.createElement('div'); d.id = 'accBox';
+    d.innerHTML = '<form><h2>Zombie Night Survival</h2><p>Melde dich an, damit dein Spielstand auf jedem Gerät da ist und nie verloren geht.</p><input name="u" placeholder="Name" autocomplete="username" maxlength="16"><input name="p" type="password" placeholder="Passwort (mind. 6 Zeichen)" autocomplete="current-password" maxlength="100"><div class="err"></div><div class="row"><button type="submit" value="login">Anmelden</button><button type="button" value="register">Konto erstellen</button></div><small>Neu hier? Name und Passwort ausdenken und „Konto erstellen“ tippen. Dein bisheriger Fortschritt auf diesem Gerät kommt mit. Merk dir dein Passwort gut – es lässt sich nicht zurücksetzen.</small></form>';
+    const st = document.createElement('style'); st.textContent = '#accBox{position:fixed;inset:0;z-index:200;display:grid;place-items:center;background:#0b0718e8;font-family:"Lilita One",system-ui,sans-serif}#accBox form{width:min(92vw,420px);padding:22px;border-radius:18px;background:#1c1530;border:3px solid #38e8e0;color:#fff;display:grid;gap:10px;box-shadow:0 10px 40px #000a}#accBox h2{margin:0;color:#38e8e0;font-weight:400}#accBox p,#accBox small{margin:0;font:600 14px system-ui,sans-serif;color:#cfc8e8}#accBox small{font-size:12px;color:#9a92b8}#accBox input{font:600 17px system-ui,sans-serif;padding:11px 12px;border-radius:10px;border:2px solid #4a3f6e;background:#0f0b1d;color:#fff}#accBox .row{display:flex;gap:8px}#accBox button{flex:1;padding:12px;border-radius:12px;border:0;font:400 18px "Lilita One",sans-serif;color:#fff;background:#2dbd5a;cursor:pointer}#accBox button[value=register]{background:#7a4cff}#accBox .err{min-height:1.2em;color:#ff7a6a;font:700 14px system-ui,sans-serif}#accBox button:disabled{opacity:.5}';
+    d.appendChild(st); document.body.appendChild(d); const f = d.querySelector('form'), er = d.querySelector('.err');
+    const go = async kind => { const user = f.u.value.trim(), pw = f.p.value; er.textContent = ''; for (const b of f.querySelectorAll('button')) b.disabled = true;
+      try { const r = await accReq({ t: kind, user, pw }); setTok(r.tok);
+        if (kind === 'register') { try { G.P.name = r.user; G.P.named = true; Save.flush(); } catch (e) { /* ignore */ } }
+        else { Save.off = true; try { localStorage.removeItem(Save.key); } catch (e) { /* ignore */ } } // the account's own progress comes from the server
+        location.reload(); }
+      catch (e) { er.textContent = ERR[e && e.code] || 'Das hat nicht geklappt (' + (e && e.code) + ').'; for (const b of f.querySelectorAll('button')) b.disabled = false; } };
+    f.addEventListener('submit', e => { e.preventDefault(); go('login'); }); f.querySelector('button[value=register]').addEventListener('click', () => go('register'));
+    setTimeout(() => { try { f.u.focus(); } catch (e) { /* ignore */ } }, 300);
+  }
+  async function logout() { try { Save.flush(); await new Promise(r => setTimeout(r, 500)); if (accReq) await accReq({ t: 'logout', tok: getTok() }); } catch (e) { /* ignore */ } Save.off = true; setTok(null); try { localStorage.removeItem(Save.key); localStorage.removeItem('zns_key'); } catch (e) { /* ignore */ } location.reload(); }
+
   function client() {
     const U = url(); if (!U || typeof WebSocket === 'undefined') return null;
     const K = key(), A = adminWord(); let ws = null, open = false, uid = null, owner = false, me = null, wait = 1000, mine = {}, rid = 0, sidN = 0, welcomed = false, kicked = false, waitVis = false;
@@ -3665,9 +3685,9 @@ const Srv = (() => {
     const conn = v => { for (const h of connH) try { h(v); } catch (e) { /* ignore */ } };
     function connect() {
       try { ws = new WebSocket(U); } catch (e) { retry(); return; }
-      ws.onopen = () => { ws.send(JSON.stringify({ t: 'hi', key: K, admin: A || undefined })); };
+      ws.onopen = () => { accTok = getTok(); ws.send(JSON.stringify({ t: 'hi', key: K, admin: A || undefined, tok: accTok || undefined })); };
       ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch (er) { return; }
-        if (m.t === 'welcome') { open = true; wait = 1000; uid = m.uid; owner = !!m.owner; me = m.peer; peers.clear(); for (const p of m.peers || []) peers.set(p.peer, { peer: p.peer, isMe: false, sameTab: false, kind: 'viewer', guest: true, presence: p.p || {}, updatedAt: Date.now() });
+        if (m.t === 'welcome') { open = true; wait = 1000; uid = m.uid; owner = !!m.owner; me = m.peer; acc = m.user || null; if (accTok && !acc) setTok(null); if (!acc && window.ZNS_SERVER) setTimeout(loginBox, 0); peers.clear(); for (const p of m.peers || []) peers.set(p.peer, { peer: p.peer, isMe: false, sameTab: false, kind: 'viewer', guest: true, presence: p.p || {}, updatedAt: Date.now() });
           if (Object.keys(mine).length) sendRaw({ t: 'p', d: mine }); for (const [sid, s] of subs) sendRaw({ t: 'sub', sid, coll: s.coll, order: s.order, lim: s.lim }); welcomed = true; while (readyQ.length) readyQ.shift()(); conn(true); notify(); return; }
         if (m.t === 'pp') { peers.set(m.peer, { peer: m.peer, isMe: false, sameTab: false, kind: 'viewer', guest: true, presence: m.p || {}, updatedAt: Date.now() }); notify(); return; }
         if (m.t === 'left') { const p = peers.get(m.peer); peers.delete(m.peer); notify(p ? [p] : []); return; }
@@ -3682,6 +3702,7 @@ const Srv = (() => {
     function req(m) { return new Promise((ok, no) => { if (!open) { no({ code: 'offline' }); return; } const id = ++rid; m.rid = id; reqs.set(id, { ok, no, tm: setTimeout(() => { reqs.delete(id); no({ code: 'timeout' }); }, 12000) }); sendRaw(m); }); }
     // waits until the server said hello (or gives up after a while: then the game runs without it)
     const ready = ms => new Promise(res => { if (welcomed) { res(true); return; } readyQ.push(() => res(true)); setTimeout(() => res(welcomed), ms); });
+    accReq = m => req(m);
     connect();
 
     const room = {
@@ -3712,7 +3733,7 @@ const Srv = (() => {
     if (/iPhone|iPad|iPod/.test(navigator.userAgent)) setTimeout(show, 4000);
     setInterval(() => { if (btn) btn.style.display = G.scene === 'lobby' && !UI.modal ? '' : 'none'; }, 700);
   }
-  return { client, url, app };
+  return { client, url, app, logout, get account() { return acc; } };
 })();
 
 /* 60_net.js */
@@ -4250,6 +4271,7 @@ const UI = (() => {
         + '<div class="field"><label for="set_flash">Helle Blitze</label><select id="set_flash" data-set="flash">' + opt('1', 'An', s.flash === false ? '0' : '1') + opt('0', 'Aus (sanfter für die Augen)', s.flash === false ? '0' : '1') + '</select><span></span></div>'
         + '<div class="field"><label for="set_bots">Freie Plätze</label><select id="set_bots" data-set="bots">' + opt('1', 'Mit Bots auffüllen', s.bots ? '1' : '0') + opt('0', 'Leer lassen', s.bots ? '1' : '0') + '</select><span></span></div>'
         + '<div class="keys"><kbd>W A S D</kbd><span>Laufen (Handy: linker Daumen)</span><kbd>Maus ziehen</kbd><span>Kamera drehen, Mausrad zoomt (Handy: rechter Daumen, zwei Finger zoomen)</span><kbd>Leertaste</kbd><span>Springen</span><kbd>1 – 5</kbd><span>Turm aus dem Bau-Menü setzen</span><kbd>Q</kbd><span>Auswahl verbessern</span><kbd>X</kbd><span>Turm verkaufen</span><kbd>R</kbd><span>Tür reparieren</span><kbd>F</kbd><span>ULTI auslösen (lädt sich durch besiegte Zombies auf)</span><kbd>T</kbd><span>Emotes: Tanzen, Winken, Jubeln … (oder der Smiley-Knopf)</span><kbd>E</kbd><span>Benutzen</span></div>'
+        + (Srv.account ? '<div class="field"><label>Konto</label><b style="align-self:center">' + esc(Srv.account) + '</b><button class="mb alt" data-act="logout">Abmelden</button></div>' : '')
         + (Game.M ? '<div class="row ctr"><button class="mb red" data-act="leave">Runde verlassen</button></div>' : '') };
     },
     invite() {
@@ -4352,6 +4374,7 @@ const UI = (() => {
       case 'cedit': Clan.edit({ motto: cform.motto || (Clan.mine() || {}).motto, c: cform.c }); Sfx.play('claim'); toast({ t: 'Gespeichert.', c: '#35e04f' }); render(); break;
       case 'cdisband': if (!confirmT || G.time - confirmT > 3) { confirmT = G.time; deny('Nochmal tippen zum Auflösen.'); break; } confirmT = 0; Clan.disband(); tab.clans = 'find'; render(); break;
       case 'ach': { const a2 = ACH.find(x => x.id === v); if (!a2 || P.ach[v]) break; const g = a2.get(P); if (g[0] < g[1]) break; P.ach[v] = 1; grant(a2.rw); Save.commit(); Sfx.play('claim'); toast({ t: 'Abzeichen abgeholt: ' + rewardText(a2.rw), c: '#ffc42e' }); render(); break; }
+      case 'logout': Save.flush(); Srv.logout(); break;
       case 'adwatch': Ads.watch().then(() => render()); break;
       case 'daily': { if (P.daily.last === today()) break; const d = new Date(); d.setDate(d.getDate() - 1); const y = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); const idx = (P.daily.last === y ? P.daily.streak : 0) % 7, rw = DAILY[idx]; P.daily.streak = (P.daily.last === y ? P.daily.streak : 0) + 1; P.daily.last = today(); grant(rw); Save.commit(); Sfx.play('claim'); toast({ t: 'Tagesbelohnung: ' + rewardText(rw), c: '#38e8e0' }); if (rw.egg) hatchEgg(EGGS.find(e => e.id === rw.egg), true); else render(); break; }
       case 'savename': { const i = $('nameIn'); const n = cleanName(i ? i.value : ''); if (n.length < 2) { deny('Der Name braucht mindestens 2 Zeichen.'); break; } P.name = n; P.named = true; Save.commit(); Sfx.play('claim'); toast({ t: 'Du heißt jetzt ' + n + '.', c: '#35e04f' }); render(); break; }
@@ -4694,7 +4717,7 @@ const Main = (() => {
   }
   return { boot, step, render, applyQuality };
 })();
-window.__zns = { G, Game, Net, UI, Lobby, Island, Gfx, Sfx, Input, Main, Save, Bus, Vfx, Clan, D: { TOWERS, CRATES, PETS, EGGS, RAR, towerInfo } };
+window.__zns = { G, Game, Net, UI, Lobby, Island, Gfx, Sfx, Input, Main, Save, Bus, Vfx, Clan, Srv, D: { TOWERS, CRATES, PETS, EGGS, RAR, towerInfo } };
 Main.boot();
 
 })();

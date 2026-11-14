@@ -105,14 +105,36 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => { clients.delete(c.peer); const n = (perIp.get(ip) || 1) - 1; if (n <= 0) perIp.delete(ip); else perIp.set(ip, n); for (const sid of c.subs) subs.delete(c.peer + ':' + sid); if (c.uid) toAll({ t: 'left', peer: c.peer }); });
   ws.on('error', () => { });
 });
+/* ---------- accounts: name + password, so a player keeps his progress on every device ---------- */
+const ACC_RE = /^[A-Za-z0-9_äöüÄÖÜß]{3,16}$/, tries = new Map();
+const accPath = n => '_acc/' + n.toLowerCase(), tokPath = t => '_tok/' + crypto.createHash('sha256').update('t:' + t).digest('base64url');
+const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 32).toString('base64');
+function tooMany(ip) { const now = Date.now(), a = (tries.get(ip) || []).filter(t => now - t < 10 * 60 * 1000); tries.set(ip, a); return a.length >= 15; }
+function newToken(uid, user) { const t = crypto.randomBytes(24).toString('base64url'); docs.set(tokPath(t), { uid, user, t: Date.now() }); touch(tokPath(t)); return t; }
+function account(c, m, reply) {
+  const user = typeof m.user === 'string' ? m.user.trim() : '', pw = typeof m.pw === 'string' ? m.pw : '';
+  if (m.t === 'logout') { if (typeof m.tok === 'string') { docs.delete(tokPath(m.tok)); touch(tokPath(m.tok)); } return reply({ ok: true }); }
+  if (tooMany(c.ip)) return reply({ ok: false, code: 'too_many' }); tries.get(c.ip).push(Date.now());
+  if (!ACC_RE.test(user)) return reply({ ok: false, code: 'bad_name' }); if (pw.length < 6 || pw.length > 100) return reply({ ok: false, code: 'bad_pw' });
+  const a = docs.get(accPath(user));
+  if (m.t === 'register') { if (a) return reply({ ok: false, code: 'taken' });
+    const owned = Array.from(docs.entries()).some(([k, v]) => k.startsWith('_acc/') && v.uid === c.uid);
+    if (owned) return reply({ ok: false, code: 'has_account' });
+    const salt = crypto.randomBytes(16).toString('base64'); docs.set(accPath(user), { name: user, salt, hash: hashPw(pw, salt), uid: c.uid, t: Date.now() }); touch(accPath(user)); log('Neues Konto:', user);
+    return reply({ ok: true, tok: newToken(c.uid, user), user }); }
+  if (!a) return reply({ ok: false, code: 'wrong' });
+  const h = Buffer.from(hashPw(pw, a.salt)), g = Buffer.from(a.hash); if (h.length !== g.length || !crypto.timingSafeEqual(h, g)) return reply({ ok: false, code: 'wrong' });
+  return reply({ ok: true, tok: newToken(a.uid, a.name), user: a.name });
+}
 function hello(c, m) {
-  c.uid = crypto.createHash('sha256').update('zns:' + m.key).digest('base64url').slice(0, 20);
+  c.uid = crypto.createHash('sha256').update('zns:' + m.key).digest('base64url').slice(0, 20); c.user = null;
+  if (typeof m.tok === 'string' && m.tok.length < 80) { const t = docs.get(tokPath(m.tok)); if (t && t.uid) { c.uid = t.uid; c.user = t.user || null; } }
   if (ADMIN && typeof m.admin === 'string' && m.admin.length >= 4 && crypto.timingSafeEqual(crypto.createHash('sha256').update(m.admin).digest(), crypto.createHash('sha256').update(ADMIN).digest())) { owners.add(c.uid); touch('_owners'); log('Neuer Besitzer:', c.uid); }
   c.owner = owners.has(c.uid);
   // one player = one connection: an older tab or a sleeping app of the same player is closed, so nobody sees a double
   for (const o of clients.values()) if (o !== c && o.uid === c.uid) { try { o.ws.close(4001, 'anderswo geöffnet'); } catch (e) { /* ignore */ } }
   const list = []; for (const o of clients.values()) if (o !== c && o.uid) list.push({ peer: o.peer, p: o.presence });
-  send(c, { t: 'welcome', peer: c.peer, uid: c.uid, owner: c.owner, peers: list });
+  send(c, { t: 'welcome', peer: c.peer, uid: c.uid, owner: c.owner, user: c.user, peers: list });
 }
 function handle(c, m) {
   const reply = (o) => send(c, Object.assign({ t: 'res', rid: m.rid }, o)), no = code => reply({ ok: false, code });
@@ -126,6 +148,7 @@ function handle(c, m) {
     case 'delete': { if (typeof m.path !== 'string' || !canWrite(m.path, c.uid)) return no('not_permitted'); docs.delete(m.path); touch(m.path); changed(m.path); return reply({ ok: true }); }
     case 'sub': { if (!['scores', 'clans', 'cmembers'].includes(m.coll) || typeof m.sid !== 'number' || c.subs.size > 20) return; const order = Array.isArray(m.order) && typeof m.order[0] === 'string' && m.order[0].length < 30 ? [m.order[0], m.order[1] === 'desc' ? 'desc' : 'asc'] : null;
       const sub = { c, sid: m.sid, coll: m.coll, order, lim: Math.max(1, Math.min(2000, m.lim | 0 || 100)) }; subs.set(c.peer + ':' + m.sid, sub); c.subs.add(m.sid); send(c, { t: 'snap', sid: m.sid, docs: snapshot(sub) }); return; }
+    case 'register': case 'login': case 'logout': return account(c, m, o => reply(o));
     case 'unsub': { subs.delete(c.peer + ':' + m.sid); c.subs.delete(m.sid); return; }
   }
 }
