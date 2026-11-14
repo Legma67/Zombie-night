@@ -62,11 +62,15 @@ const plain = d => d && typeof d === 'object' && !Array.isArray(d);
 /* ---------- the game page ---------- */
 const PAGE = path.join(__dirname, 'public', 'index.html');
 let page = null;
-function pageHtml() { if (!page) { const h = fs.readFileSync(PAGE, 'utf8'); page = h.replace('<head>', '<head><script>window.ZNS_SERVER = 1;</script>'); } return page; }
+// the page knows it runs on this server, and gets what a phone needs to install it as an app
+const APP_HEAD = '<script>window.ZNS_SERVER = 1;</script><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#1c0e3c"><link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Zombie Night">';
+function pageHtml() { if (!page) { const h = fs.readFileSync(PAGE, 'utf8'); page = h.replace('<head>', '<head>' + APP_HEAD); } return page; }
+const FILES = { '/manifest.webmanifest': 'application/manifest+json', '/sw.js': 'text/javascript', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/icon-maskable.png': 'image/png', '/apple-touch-icon.png': 'image/png' };
 const server = http.createServer((req, res) => {
   const u = req.url.split('?')[0];
   if (u === '/health') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok ' + clients.size + ' online'); return; }
   if (u === '/' || u === '/index.html') { try { const b = pageHtml(); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' }); res.end(b); } catch (e) { res.writeHead(500); res.end('Spiel-Datei fehlt (public/index.html)'); } return; }
+  if (FILES[u]) { fs.readFile(path.join(__dirname, 'public', u.slice(1)), (e, b) => { if (e) { res.writeHead(404); res.end(); return; } res.writeHead(200, { 'content-type': FILES[u], 'cache-control': u === '/sw.js' ? 'no-cache' : 'public, max-age=86400' }); res.end(b); }); return; }
   res.writeHead(404, { 'content-type': 'text/plain' }); res.end('nicht gefunden');
 });
 

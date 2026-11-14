@@ -3694,7 +3694,21 @@ const Srv = (() => {
     const user = { isOwner: () => owner, canEdit: () => owner, can: () => true, id: async () => uid, me: async () => ({ id: uid, name: '' }) };
     return { use(name) { if (name === 'room') return Promise.resolve(room); if (name === 'db') return ready(9000).then(ok => ok ? db : null); if (name === 'user') return ready(9000).then(ok => ok ? user : null); return Promise.resolve(null); }, server: U };
   }
-  return { client, url };
+  // on our own server the game can be installed as an app (icon on the home screen, full screen)
+  function app() {
+    if (!window.ZNS_SERVER || !('serviceWorker' in navigator)) return; try { navigator.serviceWorker.register('/sw.js').catch(() => { }); } catch (e) { /* ignore */ }
+    const installed = () => (window.matchMedia && matchMedia('(display-mode: fullscreen), (display-mode: standalone)').matches) || navigator.standalone;
+    if (installed()) return; let prompt = null, btn = null, gone = false;
+    const show = () => { if (btn || gone) return; btn = document.createElement('button'); btn.id = 'appInstall'; btn.textContent = '📲 Als App installieren';
+      btn.style.cssText = 'position:fixed;left:50%;top:calc(env(safe-area-inset-top,0px) + 8px);transform:translateX(-50%);z-index:60;padding:.5em 1em;border:2px solid #fff;border-radius:999px;background:#2dbd5a;color:#fff;font:700 15px "Lilita One",system-ui,sans-serif;box-shadow:0 4px 14px #0008;cursor:pointer';
+      btn.onclick = async () => { if (prompt) { prompt.prompt(); try { const r = await prompt.userChoice; if (r && r.outcome === 'accepted') { gone = true; btn.remove(); } } catch (e) { /* ignore */ } prompt = null; } else if (window.UI && UI.toast) UI.toast({ t: 'iPhone/iPad: unten auf „Teilen“ tippen und „Zum Home-Bildschirm“ wählen.', c: '#7fe9ff' }); };
+      document.body.appendChild(btn); };
+    window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); prompt = e; show(); });
+    window.addEventListener('appinstalled', () => { gone = true; if (btn) btn.remove(); });
+    if (/iPhone|iPad|iPod/.test(navigator.userAgent)) setTimeout(show, 4000);
+    setInterval(() => { if (btn) btn.style.display = G.scene === 'lobby' && !UI.modal ? '' : 'none'; }, 700);
+  }
+  return { client, url, app };
 })();
 
 /* 60_net.js */
@@ -3709,6 +3723,7 @@ const Net = (() => {
   function info(p) { const pr = p.presence || {}; return { id: p.peer, name: String(pr.n || 'Spieler').slice(0, 14), level: clamp(pr.lv | 0, 1, 100), skin: SKINS[pr.sk] ? pr.sk : 'rookie', title: TITLES[pr.ti] ? pr.ti : 'newbie', pet: PETS[pr.pt] ? pr.pt : null, clan: pr.cl ? String(pr.cl).replace(/[<>&"'`\\]/g, '').slice(0, 4) : null, clanC: Clan.COLORS[pr.cc | 0] || null, deco: DECOS[pr.dc] ? pr.dc : 'none' }; }
 
   function init() {
+    try { Srv.app(); } catch (e) { /* ignore */ }
     // inside Claude the page gets room/db/user from Claude; on our own server from the server (58_server.js)
     const c = window.claude && typeof window.claude.use === 'function' ? window.claude : Srv.client(); if (!c || typeof c.use !== 'function') return;
     c.use('room').then(r => { if (!r) return; room = r;
