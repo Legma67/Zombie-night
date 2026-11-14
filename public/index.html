@@ -4293,7 +4293,8 @@ const UI = (() => {
         + '<div class="keys"><kbd>W A S D</kbd><span>Laufen (Handy: linker Daumen)</span><kbd>Maus ziehen</kbd><span>Kamera drehen, Mausrad zoomt (Handy: rechter Daumen, zwei Finger zoomen)</span><kbd>Leertaste</kbd><span>Springen</span><kbd>1 – 5</kbd><span>Turm aus dem Bau-Menü setzen</span><kbd>Q</kbd><span>Auswahl verbessern</span><kbd>X</kbd><span>Turm verkaufen</span><kbd>R</kbd><span>Tür reparieren</span><kbd>F</kbd><span>ULTI auslösen (lädt sich durch besiegte Zombies auf)</span><kbd>T</kbd><span>Emotes: Tanzen, Winken, Jubeln … (oder der Smiley-Knopf)</span><kbd>E</kbd><span>Benutzen</span></div>'
         + (window.ZNS_SERVER && G.inf ? '<div class="field"><label>Wartung</label><b style="align-self:center">' + (Srv.maint ? 'AN – nur du kommst rein' : 'aus') + '</b><button class="mb ' + (Srv.maint ? '' : 'red') + '" data-act="maint">' + (Srv.maint ? 'Server wieder öffnen' : 'Server abschalten') + '</button></div>' : '')
         + (Srv.account ? '<div class="field"><label>Konto</label><b style="align-self:center">' + esc(Srv.account) + '</b><button class="mb alt" data-act="logout">Abmelden</button></div>' : '')
-        + (Game.M ? '<div class="row ctr"><button class="mb red" data-act="leave">Runde verlassen</button></div>' : '') };
+        + (Game.M ? '<div class="row ctr"><button class="mb red" data-act="leave">Runde verlassen</button></div>' : '')
+        + (window.ZNS_BUILD ? '<p class="muted" style="text-align:center;font-size:.8em">Version ' + window.ZNS_BUILD.slice(0, 6) + '</p>' : '') };
     },
     invite() {
       const st = Net.status(), pl = st.players.map(p => '<div class="lrow"><span class="rk">' + ic('user') + '</span><b>' + esc(p.name) + '</b><span class="muted">Lvl ' + p.level + '</span><s>' + ['In der Lobby', 'Sucht Spiel', 'In einer Runde'][p.s] + '</s></div>').join('');
