@@ -109,6 +109,8 @@ function hello(c, m) {
   c.uid = crypto.createHash('sha256').update('zns:' + m.key).digest('base64url').slice(0, 20);
   if (ADMIN && typeof m.admin === 'string' && m.admin.length >= 4 && crypto.timingSafeEqual(crypto.createHash('sha256').update(m.admin).digest(), crypto.createHash('sha256').update(ADMIN).digest())) { owners.add(c.uid); touch('_owners'); log('Neuer Besitzer:', c.uid); }
   c.owner = owners.has(c.uid);
+  // one player = one connection: an older tab or a sleeping app of the same player is closed, so nobody sees a double
+  for (const o of clients.values()) if (o !== c && o.uid === c.uid) { try { o.ws.close(4001, 'anderswo geöffnet'); } catch (e) { /* ignore */ } }
   const list = []; for (const o of clients.values()) if (o !== c && o.uid) list.push({ peer: o.peer, p: o.presence });
   send(c, { t: 'welcome', peer: c.peer, uid: c.uid, owner: c.owner, peers: list });
 }

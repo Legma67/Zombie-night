@@ -3657,7 +3657,7 @@ const Srv = (() => {
 
   function client() {
     const U = url(); if (!U || typeof WebSocket === 'undefined') return null;
-    const K = key(), A = adminWord(); let ws = null, open = false, uid = null, owner = false, me = null, wait = 1000, mine = {}, rid = 0, sidN = 0, welcomed = false;
+    const K = key(), A = adminWord(); let ws = null, open = false, uid = null, owner = false, me = null, wait = 1000, mine = {}, rid = 0, sidN = 0, welcomed = false, kicked = false, waitVis = false;
     const peers = new Map(), peerH = [], connH = [], reqs = new Map(), subs = new Map(), readyQ = [];
     const sendRaw = m => { if (ws && ws.readyState === 1) { ws.send(JSON.stringify(m)); return true; } return false; };
     const list = () => [{ peer: me, isMe: true, sameTab: true, kind: 'viewer', guest: false, presence: mine, updatedAt: Date.now() }].concat(Array.from(peers.values()));
@@ -3673,10 +3673,12 @@ const Srv = (() => {
         if (m.t === 'left') { const p = peers.get(m.peer); peers.delete(m.peer); notify(p ? [p] : []); return; }
         if (m.t === 'res') { const q = reqs.get(m.rid); if (!q) return; reqs.delete(m.rid); clearTimeout(q.tm); if (m.ok) q.ok(m); else q.no({ code: m.code || 'failed' }); return; }
         if (m.t === 'snap') { const s = subs.get(m.sid); if (s) try { s.cb({ docs: (m.docs || []).map(d => ({ id: d.id, data: () => d.d })) }); } catch (er) { console.error(er); } } };
-      ws.onclose = () => { const was = open; open = false; ws = null; for (const [k, q] of reqs) { clearTimeout(q.tm); q.no({ code: 'offline' }); reqs.delete(k); } if (peers.size) { const left = Array.from(peers.values()); peers.clear(); notify(left); } if (was) conn(false); retry(); };
+      ws.onclose = ev => { if (ev && ev.code === 4001) { kicked = true; } const was = open; open = false; ws = null; for (const [k, q] of reqs) { clearTimeout(q.tm); q.no({ code: 'offline' }); reqs.delete(k); } if (peers.size) { const left = Array.from(peers.values()); peers.clear(); notify(left); } if (was) conn(false); retry(); };
       ws.onerror = () => { };
     }
-    function retry() { setTimeout(connect, wait); wait = Math.min(15000, wait * 1.7); }
+    // a tab in the background does not reconnect (it would push out the window the player is using); it comes back when it is looked at again
+    document.addEventListener('visibilitychange', () => { if (!document.hidden && !ws && (kicked || waitVis)) { kicked = false; waitVis = false; wait = 1000; connect(); } });
+    function retry() { if (document.hidden) { waitVis = true; return; } if (kicked) { try { UI.toast({ t: 'Das Spiel ist in einem anderen Fenster oder auf einem anderen Gerät mit deinem Spielstand offen. Hier bist du offline.', c: '#ffd24a' }); } catch (e) { /* ignore */ } return; } setTimeout(connect, wait); wait = Math.min(15000, wait * 1.7); }
     function req(m) { return new Promise((ok, no) => { if (!open) { no({ code: 'offline' }); return; } const id = ++rid; m.rid = id; reqs.set(id, { ok, no, tm: setTimeout(() => { reqs.delete(id); no({ code: 'timeout' }); }, 12000) }); sendRaw(m); }); }
     // waits until the server said hello (or gives up after a while: then the game runs without it)
     const ready = ms => new Promise(res => { if (welcomed) { res(true); return; } readyQ.push(() => res(true)); setTimeout(() => res(welcomed), ms); });
