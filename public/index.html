@@ -3647,6 +3647,7 @@ const Srv = (() => {
   function url() {
     let u = null; try { u = new URLSearchParams(location.search).get('server'); } catch (e) { /* ignore */ }
     if (u) { u = u.trim(); if (/^https?:\/\//.test(u)) u = u.replace(/^http/, 'ws'); else if (!/^wss?:\/\//.test(u)) u = 'wss://' + u; if (!/\/ws\/?$/.test(u)) u = u.replace(/\/$/, '') + '/ws'; return u; }
+    if (window.ZNS_SERVER_URL) return window.ZNS_SERVER_URL; // a copy of the game on a game portal talks to our server
     if (window.ZNS_SERVER && /^https?:$/.test(location.protocol)) return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     return null;
   }
@@ -3723,7 +3724,7 @@ const Net = (() => {
   function info(p) { const pr = p.presence || {}; return { id: p.peer, name: String(pr.n || 'Spieler').slice(0, 14), level: clamp(pr.lv | 0, 1, 100), skin: SKINS[pr.sk] ? pr.sk : 'rookie', title: TITLES[pr.ti] ? pr.ti : 'newbie', pet: PETS[pr.pt] ? pr.pt : null, clan: pr.cl ? String(pr.cl).replace(/[<>&"'`\\]/g, '').slice(0, 4) : null, clanC: Clan.COLORS[pr.cc | 0] || null, deco: DECOS[pr.dc] ? pr.dc : 'none' }; }
 
   function init() {
-    try { Srv.app(); } catch (e) { /* ignore */ }
+    try { Srv.app(); } catch (e) { /* ignore */ } try { Ads.init(); } catch (e) { /* ignore */ }
     // inside Claude the page gets room/db/user from Claude; on our own server from the server (58_server.js)
     const c = window.claude && typeof window.claude.use === 'function' ? window.claude : Srv.client(); if (!c || typeof c.use !== 'function') return;
     c.use('room').then(r => { if (!r) return; room = r;
@@ -3840,6 +3841,51 @@ const Net = (() => {
   }
   function online_() { return { room: !!room && online, db: boardLive, players: peers.map(info).map((i, k) => Object.assign(i, { s: peers[k].presence.s | 0 })) }; }
   return { init, tick, resumed() { resyncT = 2.5; }, joinQueue, leaveQueue, lobbyActors, widget, joinWidget, rows, status: online_, get Q() { return Q; }, get myPeer() { return myPeer; } };
+})();
+
+/* 62_ads.js */
+/* ===== 62 ads: "watch a video for gems" when the game runs on a game portal (CrazyGames, Poki).
+   Nothing is loaded anywhere else (not inside Claude, not on the own server). ?portal=test shows a pretend ad for testing. ===== */
+const Ads = (() => {
+  const PER_DAY = 5, GEMS = 15, PAUSE = 120; // videos per day, gems per video, seconds between two videos
+  let kind = null, sdk = null, ready = false, busy = false, lastScene = null;
+  function detect() {
+    let p = null; try { p = new URLSearchParams(location.search).get('portal'); } catch (e) { /* ignore */ }
+    p = p || window.ZNS_PORTAL || null; const h = location.hostname || '';
+    if (!p && /crazygames/.test(h)) p = 'crazy'; if (!p && /poki/.test(h)) p = 'poki';
+    return ['crazy', 'poki', 'test'].includes(p) ? p : null;
+  }
+  const load = src => new Promise((ok, no) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = no; document.head.appendChild(s); });
+  async function init() {
+    kind = detect(); if (!kind) return;
+    try {
+      if (kind === 'crazy') { await load('https://sdk.crazygames.com/crazygames-sdk-v3.js'); sdk = window.CrazyGames && window.CrazyGames.SDK; await sdk.init(); ready = true; }
+      else if (kind === 'poki') { await load('https://game-cdn.poki.com/scripts/v2/poki-sdk.js'); sdk = window.PokiSDK; try { await sdk.init(); } catch (e) { /* the game runs anyway */ } ready = true; try { sdk.gameLoadingFinished(); } catch (e) { /* ignore */ } }
+      else ready = true;
+    } catch (e) { ready = false; }
+    // the portals like to know when somebody is really playing
+    setInterval(() => { const s = G.scene === 'match'; if (s === lastScene) return; lastScene = s; try { if (kind === 'poki' && sdk) s ? sdk.gameplayStart() : sdk.gameplayStop(); if (kind === 'crazy' && sdk && sdk.game) s ? sdk.game.gameplayStart() : sdk.game.gameplayStop(); } catch (e) { /* ignore */ } }, 1000);
+    Bus.emit('profile');
+  }
+  function state() { const P = G.P, d = today(); if (!P.ads || P.ads.d !== d) P.ads = { d, n: 0, t: 0 }; return P.ads; }
+  // can a video be offered right now? returns null or the reason why not
+  function why() { if (!ready) return 'off'; const a = state(); if (a.n >= PER_DAY) return 'Heute schon ' + PER_DAY + ' Videos angesehen. Morgen gibt es neue.'; const w = Math.ceil(PAUSE - (Date.now() - a.t) / 1000); if (w > 0) return 'Nächstes Video in ' + (w >= 60 ? Math.ceil(w / 60) + ' Min.' : w + ' s') + '.'; return null; }
+  // the game stands still and is quiet while the ad runs
+  function pause(on) { if (on) { G.adVol = G.P.set.master; G.P.set.master = 0; G.hold = true; } else { if (G.adVol !== undefined) G.P.set.master = G.adVol; G.adVol = undefined; G.hold = false; } try { Sfx.vol(); } catch (e) { /* ignore */ } }
+  function show() {
+    return new Promise(res => {
+      if (kind === 'crazy') sdk.ad.requestAd('rewarded', { adStarted: () => pause(true), adFinished: () => { pause(false); res(true); }, adError: () => { pause(false); res(false); } });
+      else if (kind === 'poki') { try { sdk.gameplayStop(); } catch (e) { /* ignore */ } sdk.rewardedBreak({ onStart: () => pause(true) }).then(ok => { pause(false); res(!!ok); }, () => { pause(false); res(false); }); }
+      else { pause(true); const d = document.createElement('div'); d.style.cssText = 'position:fixed;inset:0;z-index:99;display:grid;place-items:center;background:#000d;color:#fff;font:700 28px "Lilita One",sans-serif'; d.textContent = 'Werbung (Test) …'; document.body.appendChild(d); setTimeout(() => { d.remove(); pause(false); res(true); }, 2500); }
+    });
+  }
+  async function watch() {
+    if (busy) return; const w = why(); if (w) { if (w !== 'off') UI.toast({ t: w, c: '#ffd24a' }); return; } busy = true;
+    const ok = await show(); busy = false;
+    if (ok) { const a = state(); a.n++; a.t = Date.now(); G.P.gems += GEMS; Save.commit(); Sfx.play('claim'); UI.toast({ t: 'Danke fürs Ansehen! +' + GEMS + ' Edelsteine', c: '#7fe9ff' }); Bus.emit('profile'); }
+    else UI.toast({ t: 'Gerade ist kein Video da. Versuch es später nochmal.', c: '#ffd24a' });
+  }
+  return { init, watch, why, get on() { return ready; }, get left() { return ready ? Math.max(0, PER_DAY - state().n) : 0; }, GEMS };
 })();
 
 /* 65_clans.js */
@@ -4179,7 +4225,7 @@ const UI = (() => {
       const days = DAILY.map((r, i) => '<div class="day ' + (i < idx || (!can && i === idx) ? 'done' : i === idx ? 'now' : '') + '"><b>Tag ' + (i + 1) + '</b>' + (r.coins ? COIN : r.gems ? GEM : th('e_' + r.egg).replace('<img', '<img style="height:1.600em"')) + '<span>' + (r.coins ? fmt(r.coins) : r.gems ? r.gems : 'Ei') + '</span></div>').join('');
       let lv = ''; for (let l = P.level + 1; l <= Math.min(100, P.level + 4); l++) lv += '<div class="lrow"><span class="rk">' + l + '</span><b>Level ' + l + '</b><span></span><s>' + rewardText(levelReward(l)) + '</s></div>';
       const Q = questsToday(P), qh = Q.list.map(q => { const d = QUESTS.find(x => x.id === q.id); if (!d) return ''; const have = Math.max(0, (P[d.k] || 0) - q.base), k = Math.min(1, have / d.n), ok = have >= d.n; return '<div class="quest ' + (q.done ? 'done' : ok ? 'ready' : '') + '"><div><b>' + d.t.replace('{n}', d.n) + '</b><div class="qbar"><span style="transform:scaleX(' + k.toFixed(3) + ')"></span><em>' + Math.min(have, d.n) + ' / ' + d.n + '</em></div></div><span class="qrw">' + rewardText(d.rw) + '</span>' + (q.done ? '<button class="mb alt" disabled>' + ic('check') + '</button>' : '<button class="mb ' + (ok ? 'gold' : 'alt') + '" data-act="quest:' + q.id + '" ' + (ok ? '' : 'disabled') + '>Abholen</button>') + '</div>'; }).join('');
-      return { t: 'BELOHNUNGEN', c: '#38e8e0', h: '<h3 class="d" style="margin:0;font-weight:400">Tagesaufgaben <small class="muted" style="font-family:var(--f-b);font-size:.55em">· jeden Tag neu</small></h3><div class="quests">' + qh + '</div><h3 class="d" style="margin:0;font-weight:400">Tägliche Belohnung</h3><div class="days">' + days + '</div><div class="row ctr"><button class="mb gold" data-act="daily" ' + (can ? '' : 'disabled') + '>' + (can ? 'Heute abholen' : 'Morgen wieder') + '</button></div><h3 class="d" style="margin:0;font-weight:400">Nächste Level-Belohnungen</h3>' + (lv || '<p class="muted">Du hast Level 100 erreicht.</p>') + '<p class="muted">Nach jeder Runde gibt es Erfahrung und Münzen für jede überlebte Welle, einen Bonus für den Sieg und in schweren Modi Edelsteine.</p>' };
+      return { t: 'BELOHNUNGEN', c: '#38e8e0', h: '<h3 class="d" style="margin:0;font-weight:400">Tagesaufgaben <small class="muted" style="font-family:var(--f-b);font-size:.55em">· jeden Tag neu</small></h3><div class="quests">' + qh + '</div><h3 class="d" style="margin:0;font-weight:400">Tägliche Belohnung</h3><div class="days">' + days + '</div><div class="row ctr"><button class="mb gold" data-act="daily" ' + (can ? '' : 'disabled') + '>' + (can ? 'Heute abholen' : 'Morgen wieder') + '</button></div>' + (Ads.on ? '<h3 class="d" style="margin:0;font-weight:400">Video ansehen</h3><div class="row ctr"><button class="mb" data-act="adwatch" ' + (Ads.left ? '' : 'disabled') + '>🎬 Video ansehen: +' + Ads.GEMS + ' ' + GEM + '</button><span class="muted">noch ' + Ads.left + ' heute</span></div>' : '') + '<h3 class="d" style="margin:0;font-weight:400">Nächste Level-Belohnungen</h3>' + (lv || '<p class="muted">Du hast Level 100 erreicht.</p>') + '<p class="muted">Nach jeder Runde gibt es Erfahrung und Münzen für jede überlebte Welle, einen Bonus für den Sieg und in schweren Modi Edelsteine.</p>' };
     },
     leaderboard() {
       const t = tab.leaderboard || 'level', rows = Net.rows(t).slice(0, 30), st = Net.status(), lab = { level: 'Lvl ', wins: '', points: '' }, suf = { level: '', wins: ' Siege', points: ' Punkte' };
@@ -4303,6 +4349,7 @@ const UI = (() => {
       case 'cedit': Clan.edit({ motto: cform.motto || (Clan.mine() || {}).motto, c: cform.c }); Sfx.play('claim'); toast({ t: 'Gespeichert.', c: '#35e04f' }); render(); break;
       case 'cdisband': if (!confirmT || G.time - confirmT > 3) { confirmT = G.time; deny('Nochmal tippen zum Auflösen.'); break; } confirmT = 0; Clan.disband(); tab.clans = 'find'; render(); break;
       case 'ach': { const a2 = ACH.find(x => x.id === v); if (!a2 || P.ach[v]) break; const g = a2.get(P); if (g[0] < g[1]) break; P.ach[v] = 1; grant(a2.rw); Save.commit(); Sfx.play('claim'); toast({ t: 'Abzeichen abgeholt: ' + rewardText(a2.rw), c: '#ffc42e' }); render(); break; }
+      case 'adwatch': Ads.watch().then(() => render()); break;
       case 'daily': { if (P.daily.last === today()) break; const d = new Date(); d.setDate(d.getDate() - 1); const y = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); const idx = (P.daily.last === y ? P.daily.streak : 0) % 7, rw = DAILY[idx]; P.daily.streak = (P.daily.last === y ? P.daily.streak : 0) + 1; P.daily.last = today(); grant(rw); Save.commit(); Sfx.play('claim'); toast({ t: 'Tagesbelohnung: ' + rewardText(rw), c: '#38e8e0' }); if (rw.egg) hatchEgg(EGGS.find(e => e.id === rw.egg), true); else render(); break; }
       case 'savename': { const i = $('nameIn'); const n = cleanName(i ? i.value : ''); if (n.length < 2) { deny('Der Name braucht mindestens 2 Zeichen.'); break; } P.name = n; P.named = true; Save.commit(); Sfx.play('claim'); toast({ t: 'Du heißt jetzt ' + n + '.', c: '#35e04f' }); render(); break; }
       case 'interact': Bus.emit('interact'); break;
