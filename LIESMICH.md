@@ -44,5 +44,10 @@ Danach im Browser `http://localhost:8080` öffnen. Andere im selben WLAN erreich
 | `DATABASE_URL` | Postgres-Datenbank (Neon, Supabase, Render …) |
 | `DATA_DIR` | Ordner für die Datei-Speicherung ohne Datenbank |
 | `MAX_PLAYERS` | höchstens so viele gleichzeitig (Standard 300) |
+| `MAINTENANCE` | wenn gesetzt (z. B. `Neue Türme kommen`): Wartung, nur der Besitzer kommt rein. Geht auch im Spiel: Einstellungen → „Server abschalten“ |
 
 Das Spiel kann auch woanders liegen (z. B. itch.io): Dann `?server=<dein-name>.onrender.com` an die Adresse hängen.
+
+## Updates
+
+Bei jedem Push startet Render die neue Version. Sie schaltet die alte ab: alle Spieler sehen „Update wird installiert“, laufende Runden werden beendet (Belohnung bleibt), alles wird gespeichert. Erst danach lässt die neue Version Spieler rein, und das Spiel lädt bei allen von selbst neu.

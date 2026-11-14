@@ -8,12 +8,18 @@
 //   DATABASE_URL  Postgres-Datenbank (z. B. von Neon, Supabase oder Render). Ohne sie speichert der Server in eine Datei.
 //   DATA_DIR      Ordner für die Datei-Speicherung (Standard ./data)
 //   MAX_PLAYERS   wie viele gleichzeitig verbunden sein dürfen (Standard 300)
+//   MAINTENANCE   wenn gesetzt (z. B. "Wir bauen neue Türme ein"): Wartung, nur der Besitzer kommt rein
+//
+// Updates: Sobald eine neue Version startet, schaltet sie die alte ab. Die alte Version beendet alle Runden,
+// speichert alles und meldet sich ab; erst dann lädt die neue Version die Daten und lässt Spieler rein.
+// Bis dahin sehen alle „Update wird installiert“, danach lädt das Spiel bei allen von selbst neu.
 'use strict';
 const http = require('http'), fs = require('fs'), path = require('path'), crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 
 const PORT = +process.env.PORT || 8080, ADMIN = process.env.ADMIN_SECRET || '', DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const MAX_PLAYERS = +process.env.MAX_PLAYERS || 300, PER_IP = 8, PRESENCE_MAX = 4096, DOC_MAX = 4096, PROFILE_MAX = 256 * 1024;
+const BOOT = crypto.randomBytes(6).toString('hex'), START = Date.now(); let upd = 'start'; // 'start' = new version waits for the old one, 'stop' = old version hands over, null = open
 const log = (...a) => console.log(new Date().toISOString().slice(0, 19), ...a);
 
 /* ---------- storage: every document lives in memory and is written to Postgres or a file ---------- */
@@ -28,7 +34,7 @@ async function loadStore() {
     pg = new Pool({ connectionString: url, ssl: local ? false : { rejectUnauthorized: false }, max: 4 });
     pg.on('error', e => log('Datenbank-Verbindung kurz weg (wird neu aufgebaut):', e.message)); // e.g. a free database that sleeps when idle
     await pg.query('create table if not exists zns_docs (path text primary key, data jsonb not null, t bigint not null)');
-    const r = await pg.query('select path, data from zns_docs'); for (const row of r.rows) { if (row.path === '_owners') owners = new Set(row.data.list || []); else docs.set(row.path, row.data); }
+    const r = await pg.query('select path, data from zns_docs'); for (const row of r.rows) { if (row.path.startsWith('_sys/')) continue; if (row.path === '_owners') owners = new Set(row.data.list || []); else docs.set(row.path, row.data); }
     log('Postgres verbunden,', docs.size, 'Einträge geladen'); return;
   } catch (e) { log('ACHTUNG: Datenbank nicht erreichbar (' + e.message + '). Prüfe DATABASE_URL. Der Server läuft trotzdem und speichert so lange nur in eine Datei.'); try { await pg.end(); } catch (er) { /* ignore */ } pg = null; docs.clear(); }
   {
@@ -50,6 +56,39 @@ async function flush() {
   flushing = false;
 }
 
+/* ---------- updates: the new version takes over from the old one without losing anything ---------- */
+const sysSet = (k, d) => pg.query('insert into zns_docs (path, data, t) values ($1, $2, $3) on conflict (path) do update set data = excluded.data, t = excluded.t', ['_sys/' + k, d, Date.now()]);
+const sysGet = async k => { const r = await pg.query('select data from zns_docs where path = $1', ['_sys/' + k]); return r.rows[0] ? r.rows[0].data : null; };
+async function reload() { const r = await pg.query('select path, data from zns_docs'); docs.clear(); for (const row of r.rows) { if (row.path.startsWith('_sys/')) continue; if (row.path === '_owners') owners = new Set(row.data.list || []); else docs.set(row.path, row.data); } }
+// the old version: end everything, save, tell the new version it may start
+async function handOver(why) {
+  if (upd === 'stop') return; upd = 'stop'; log('Neue Version ist da (' + why + '): alle Spieler bekommen „Update“, speichere ...');
+  for (const c of clients.values()) send(c, { t: 'maint', why: 'update' });
+  await new Promise(r => setTimeout(r, 2000)); // the players end their round and send their last save
+  for (const c of clients.values()) try { c.ws.close(4003, 'update'); } catch (e) { /* ignore */ }
+  for (let i = 0; i < 5 && (dirty.size || flushing); i++) { await flush(); await new Promise(r => setTimeout(r, 300)); }
+  if (pg) try { await sysSet('handoff', { boot: BOOT, t: Date.now() }); log('Übergabe an die neue Version fertig'); } catch (e) { log('Übergabe fehlgeschlagen:', e.message); }
+}
+async function startUp() {
+  if (!pg) { upd = null; return; }
+  try {
+    const alive = await sysGet('alive'), h0 = await sysGet('handoff'); await sysSet('deploy', { boot: BOOT, t: START });
+    if (!alive || alive.boot === BOOT || Date.now() - alive.t > 20000 || (h0 && h0.boot === alive.boot)) { upd = null; log('Keine ältere Version läuft, Spiel ist offen'); }
+    else log('Ältere Version läuft noch, warte auf ihre Übergabe ...');
+  } catch (e) { upd = null; log('Update-Abstimmung fehlgeschlagen:', e.message); }
+  setInterval(async () => { try {
+    if (upd === 'start') { const h = await sysGet('handoff'), a = await sysGet('alive'), late = Date.now() - START > 90000; // never wait forever
+      const gone = !a || Date.now() - a.t > 15000 || (h && h.boot === a.boot); // the old one handed over, or crashed
+      if (gone || late) { await reload(); upd = null; log(late ? 'Alte Version hat sich nicht gemeldet, starte trotzdem' : 'Daten übernommen, Spiel ist offen,', docs.size, 'Einträge'); } return; }
+    if (upd === 'stop') return;
+    const d = await sysGet('deploy'); if (d && d.boot !== BOOT && d.t > START) { await handOver('Deploy'); return; }
+    await sysSet('alive', { boot: BOOT, t: Date.now() });
+  } catch (e) { /* database asleep for a moment */ } }, 3000);
+}
+// maintenance by hand: MAINTENANCE on the host, or the owner switches it in the game
+const maintText = () => process.env.MAINTENANCE ? String(process.env.MAINTENANCE) : (docs.get('_maint') || {}).text || '';
+const maintOn = () => !!process.env.MAINTENANCE || !!(docs.get('_maint') || {}).on;
+
 /* ---------- who may read and write what ---------- */
 // scores/<id>, clans/<id>, cmembers/<id>: everybody reads, only the player <id> writes his own
 // data/users/<id>/profile: only the player himself
@@ -63,12 +102,13 @@ const plain = d => d && typeof d === 'object' && !Array.isArray(d);
 const PAGE = path.join(__dirname, 'public', 'index.html');
 let page = null;
 // the page knows it runs on this server, and gets what a phone needs to install it as an app
-const APP_HEAD = '<script>window.ZNS_SERVER = 1;</script><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#1c0e3c"><link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Zombie Night">';
+let BUILD = ''; try { BUILD = crypto.createHash('sha256').update(fs.readFileSync(path.join(__dirname, 'public', 'index.html'))).digest('hex').slice(0, 12); } catch (e) { /* no page */ }
+const APP_HEAD = '<script>window.ZNS_SERVER = 1; window.ZNS_BUILD = "' + BUILD + '";</script><link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#1c0e3c"><link rel="icon" href="/icon-192.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="Zombie Night">';
 function pageHtml() { if (!page) { const h = fs.readFileSync(PAGE, 'utf8'); page = h.replace('<head>', '<head>' + APP_HEAD); } return page; }
 const FILES = { '/manifest.webmanifest': 'application/manifest+json', '/sw.js': 'text/javascript', '/icon-192.png': 'image/png', '/icon-512.png': 'image/png', '/icon-maskable.png': 'image/png', '/apple-touch-icon.png': 'image/png' };
 const server = http.createServer((req, res) => {
   const u = req.url.split('?')[0];
-  if (u === '/health') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok ' + clients.size + ' online'); return; }
+  if (u === '/health') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok ' + clients.size + ' online' + (upd ? ' (Update: ' + upd + ')' : maintOn() ? ' (Wartung)' : '') + ' ' + BUILD); return; }
   if (u === '/' || u === '/index.html') { try { const b = pageHtml(); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' }); res.end(b); } catch (e) { res.writeHead(500); res.end('Spiel-Datei fehlt (public/index.html)'); } return; }
   if (FILES[u]) { fs.readFile(path.join(__dirname, 'public', u.slice(1)), (e, b) => { if (e) { res.writeHead(404); res.end(); return; } res.writeHead(200, { 'content-type': FILES[u], 'cache-control': u === '/sw.js' ? 'no-cache' : 'public, max-age=86400' }); res.end(b); }); return; }
   res.writeHead(404, { 'content-type': 'text/plain' }); res.end('nicht gefunden');
@@ -131,10 +171,12 @@ function hello(c, m) {
   if (typeof m.tok === 'string' && m.tok.length < 80) { const t = docs.get(tokPath(m.tok)); if (t && t.uid) { c.uid = t.uid; c.user = t.user || null; } }
   if (ADMIN && typeof m.admin === 'string' && m.admin.length >= 4 && crypto.timingSafeEqual(crypto.createHash('sha256').update(m.admin).digest(), crypto.createHash('sha256').update(ADMIN).digest())) { owners.add(c.uid); touch('_owners'); log('Neuer Besitzer:', c.uid); }
   c.owner = owners.has(c.uid);
+  if (upd) { send(c, { t: 'maint', why: 'update' }); c.ws.close(4003, 'update'); return; }
+  if (maintOn() && !c.owner) { send(c, { t: 'maint', why: 'manual', text: maintText() }); c.ws.close(4003, 'wartung'); return; }
   // one player = one connection: an older tab or a sleeping app of the same player is closed, so nobody sees a double
   for (const o of clients.values()) if (o !== c && o.uid === c.uid) { try { o.ws.close(4001, 'anderswo geöffnet'); } catch (e) { /* ignore */ } }
   const list = []; for (const o of clients.values()) if (o !== c && o.uid) list.push({ peer: o.peer, p: o.presence });
-  send(c, { t: 'welcome', peer: c.peer, uid: c.uid, owner: c.owner, user: c.user, peers: list });
+  send(c, { t: 'welcome', peer: c.peer, uid: c.uid, owner: c.owner, user: c.user, build: BUILD, maint: maintOn() ? maintText() || true : false, peers: list });
 }
 function handle(c, m) {
   const reply = (o) => send(c, Object.assign({ t: 'res', rid: m.rid }, o)), no = code => reply({ ok: false, code });
@@ -149,13 +191,16 @@ function handle(c, m) {
     case 'sub': { if (!['scores', 'clans', 'cmembers'].includes(m.coll) || typeof m.sid !== 'number' || c.subs.size > 20) return; const order = Array.isArray(m.order) && typeof m.order[0] === 'string' && m.order[0].length < 30 ? [m.order[0], m.order[1] === 'desc' ? 'desc' : 'asc'] : null;
       const sub = { c, sid: m.sid, coll: m.coll, order, lim: Math.max(1, Math.min(2000, m.lim | 0 || 100)) }; subs.set(c.peer + ':' + m.sid, sub); c.subs.add(m.sid); send(c, { t: 'snap', sid: m.sid, docs: snapshot(sub) }); return; }
     case 'register': case 'login': case 'logout': return account(c, m, o => reply(o));
+    case 'maint': { if (!c.owner) return no('not_permitted'); const on = !!m.on, text = typeof m.text === 'string' ? m.text.slice(0, 200) : ''; docs.set('_maint', { on, text }); touch('_maint'); log('Wartung', on ? 'AN' : 'aus', text);
+      if (on) for (const o of clients.values()) if (o.uid && !o.owner) { send(o, { t: 'maint', why: 'manual', text }); setTimeout(() => { try { o.ws.close(4003, 'wartung'); } catch (e) { /* ignore */ } }, 2000); }
+      return reply({ ok: true, on }); }
     case 'unsub': { subs.delete(c.peer + ':' + m.sid); c.subs.delete(m.sid); return; }
   }
 }
 // drop connections that stopped answering
 setInterval(() => { for (const c of clients.values()) { if (!c.alive) { c.ws.terminate(); continue; } c.alive = false; try { c.ws.ping(); } catch (e) { /* ignore */ } } }, 30000);
 setInterval(flush, 3000);
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { log('Server stoppt, speichere ...'); await flush(); process.exit(0); });
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { log('Server stoppt, speichere ...'); if (upd !== 'start') await handOver('Signal'); await flush(); process.exit(0); });
 
-loadStore().then(() => server.listen(PORT, () => log('Zombie Night Survival läuft auf Port', PORT, pg ? '(Postgres)' : '(Datei ' + FILE + ')', ADMIN ? '' : '– ohne ADMIN_SECRET gibt es keinen Besitzer')))
+loadStore().then(startUp).then(() => server.listen(PORT, () => log('Zombie Night Survival läuft auf Port', PORT, pg ? '(Postgres)' : '(Datei ' + FILE + ')', ADMIN ? '' : '– ohne ADMIN_SECRET gibt es keinen Besitzer')))
   .catch(e => { console.error('Start fehlgeschlagen:', e.message); process.exit(1); });

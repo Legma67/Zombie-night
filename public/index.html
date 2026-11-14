@@ -3675,6 +3675,21 @@ const Srv = (() => {
   }
   async function logout() { try { Save.flush(); await new Promise(r => setTimeout(r, 500)); if (accReq) await accReq({ t: 'logout', tok: getTok() }); } catch (e) { /* ignore */ } Save.off = true; setTok(null); try { localStorage.removeItem(Save.key); localStorage.removeItem('zns_key'); } catch (e) { /* ignore */ } location.reload(); }
 
+  // updates and maintenance: the server says so, the game ends the round, saves and waits; a new version reloads by itself
+  let maintOn = false, inMaint = false, setMaint = null;
+  function maintBox(m) {
+    let d = document.getElementById('maintBox');
+    if (!d) { d = document.createElement('div'); d.id = 'maintBox'; const st = document.createElement('style'); st.textContent = '#maintBox{position:fixed;inset:0;z-index:210;display:grid;place-items:center;background:#0b0718f2;font-family:"Lilita One",system-ui,sans-serif;color:#fff;text-align:center}#maintBox>div{width:min(92vw,440px);padding:24px;border-radius:18px;background:#1c1530;border:3px solid #ffc42e;display:grid;gap:10px;justify-items:center}#maintBox h2{margin:0;color:#ffc42e;font-weight:400;font-size:26px}#maintBox p{margin:0;font:600 15px system-ui,sans-serif;color:#cfc8e8}#maintBox i{width:38px;height:38px;border-radius:50%;border:5px solid #ffc42e44;border-top-color:#ffc42e;animation:mb 1s linear infinite}@keyframes mb{to{transform:rotate(360deg)}}'; d.appendChild(st); d.appendChild(document.createElement('div')); document.body.appendChild(d); }
+    const up = m.why === 'update', box = d.lastChild;
+    box.innerHTML = '<i></i><h2>' + (up ? 'Update wird installiert' : 'Wartungsarbeiten') + '</h2><p></p><p>' + (up ? 'Gleich gibt es eine neue Version. Dein Fortschritt ist gespeichert. Das Spiel startet von selbst neu, du musst nichts tun.' : 'Der Server ist gerade abgeschaltet. Dein Fortschritt ist gespeichert. Sobald es weitergeht, startet das Spiel von selbst.') + '</p>';
+    box.querySelector('p').textContent = m.text || ''; if (!m.text) box.querySelector('p').remove();
+  }
+  function maint(m) {
+    if (!inMaint) { inMaint = true; try { Game.settle(); } catch (e) { /* ignore */ } try { Save.flush(); } catch (e) { /* ignore */ } try { if (G.scene === 'match') { Game.leave(); UI.setScene(); } } catch (e) { console.error(e); } try { G.hold = true; } catch (e) { /* ignore */ } }
+    maintBox(m);
+  }
+  function maintEnd() { if (!inMaint) return; inMaint = false; const d = document.getElementById('maintBox'); if (d) d.remove(); try { G.hold = false; } catch (e) { /* ignore */ } }
+
   function client() {
     const U = url(); if (!U || typeof WebSocket === 'undefined') return null;
     const K = key(), A = adminWord(); let ws = null, open = false, uid = null, owner = false, me = null, wait = 1000, mine = {}, rid = 0, sidN = 0, welcomed = false, kicked = false, waitVis = false;
@@ -3687,22 +3702,27 @@ const Srv = (() => {
       try { ws = new WebSocket(U); } catch (e) { retry(); return; }
       ws.onopen = () => { accTok = getTok(); ws.send(JSON.stringify({ t: 'hi', key: K, admin: A || undefined, tok: accTok || undefined })); };
       ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch (er) { return; }
-        if (m.t === 'welcome') { open = true; wait = 1000; uid = m.uid; owner = !!m.owner; me = m.peer; acc = m.user || null; if (accTok && !acc) setTok(null); if (!acc && window.ZNS_SERVER) setTimeout(loginBox, 0); peers.clear(); for (const p of m.peers || []) peers.set(p.peer, { peer: p.peer, isMe: false, sameTab: false, kind: 'viewer', guest: true, presence: p.p || {}, updatedAt: Date.now() });
+        if (m.t === 'maint') { maint(m); return; }
+        if (m.t === 'welcome') {
+          if (m.build && window.ZNS_BUILD && m.build !== window.ZNS_BUILD) { let done = null; try { done = sessionStorage.getItem('zns_rl'); } catch (e) { /* ignore */ }
+            if (done !== m.build) { try { sessionStorage.setItem('zns_rl', m.build); } catch (e) { /* ignore */ } try { Save.flush(); } catch (e) { /* ignore */ } maint({ why: 'update' }); setTimeout(() => location.reload(), 300); return; } }
+          maintEnd(); maintOn = !!m.maint; if (maintOn && m.owner) setTimeout(() => { try { UI.toast({ t: 'Wartung ist an: nur du kannst gerade spielen.', c: '#ffc42e' }); } catch (e) { /* ignore */ } }, 1500);
+          open = true; wait = 1000; uid = m.uid; owner = !!m.owner; me = m.peer; acc = m.user || null; if (accTok && !acc) setTok(null); if (!acc && window.ZNS_SERVER) setTimeout(loginBox, 0); peers.clear(); for (const p of m.peers || []) peers.set(p.peer, { peer: p.peer, isMe: false, sameTab: false, kind: 'viewer', guest: true, presence: p.p || {}, updatedAt: Date.now() });
           if (Object.keys(mine).length) sendRaw({ t: 'p', d: mine }); for (const [sid, s] of subs) sendRaw({ t: 'sub', sid, coll: s.coll, order: s.order, lim: s.lim }); welcomed = true; while (readyQ.length) readyQ.shift()(); conn(true); notify(); return; }
         if (m.t === 'pp') { peers.set(m.peer, { peer: m.peer, isMe: false, sameTab: false, kind: 'viewer', guest: true, presence: m.p || {}, updatedAt: Date.now() }); notify(); return; }
         if (m.t === 'left') { const p = peers.get(m.peer); peers.delete(m.peer); notify(p ? [p] : []); return; }
         if (m.t === 'res') { const q = reqs.get(m.rid); if (!q) return; reqs.delete(m.rid); clearTimeout(q.tm); if (m.ok) q.ok(m); else q.no({ code: m.code || 'failed' }); return; }
         if (m.t === 'snap') { const s = subs.get(m.sid); if (s) try { s.cb({ docs: (m.docs || []).map(d => ({ id: d.id, data: () => d.d })) }); } catch (er) { console.error(er); } } };
-      ws.onclose = ev => { if (ev && ev.code === 4001) { kicked = true; } const was = open; open = false; ws = null; for (const [k, q] of reqs) { clearTimeout(q.tm); q.no({ code: 'offline' }); reqs.delete(k); } if (peers.size) { const left = Array.from(peers.values()); peers.clear(); notify(left); } if (was) conn(false); retry(); };
+      ws.onclose = ev => { if (ev && ev.code === 4001) { kicked = true; } if (ev && ev.code === 4003) { if (!inMaint) maint({ why: 'update' }); wait = 4000; } const was = open; open = false; ws = null; for (const [k, q] of reqs) { clearTimeout(q.tm); q.no({ code: 'offline' }); reqs.delete(k); } if (peers.size) { const left = Array.from(peers.values()); peers.clear(); notify(left); } if (was) conn(false); retry(); };
       ws.onerror = () => { };
     }
     // a tab in the background does not reconnect (it would push out the window the player is using); it comes back when it is looked at again
     document.addEventListener('visibilitychange', () => { if (!document.hidden && !ws && (kicked || waitVis)) { kicked = false; waitVis = false; wait = 1000; connect(); } });
-    function retry() { if (document.hidden) { waitVis = true; return; } if (kicked) { try { UI.toast({ t: 'Das Spiel ist in einem anderen Fenster oder auf einem anderen Gerät mit deinem Spielstand offen. Hier bist du offline.', c: '#ffd24a' }); } catch (e) { /* ignore */ } return; } setTimeout(connect, wait); wait = Math.min(15000, wait * 1.7); }
+    function retry() { if (document.hidden) { waitVis = true; return; } if (kicked) { try { UI.toast({ t: 'Das Spiel ist in einem anderen Fenster oder auf einem anderen Gerät mit deinem Spielstand offen. Hier bist du offline.', c: '#ffd24a' }); } catch (e) { /* ignore */ } return; } setTimeout(connect, wait); wait = inMaint ? 4000 : Math.min(15000, wait * 1.7); }
     function req(m) { return new Promise((ok, no) => { if (!open) { no({ code: 'offline' }); return; } const id = ++rid; m.rid = id; reqs.set(id, { ok, no, tm: setTimeout(() => { reqs.delete(id); no({ code: 'timeout' }); }, 12000) }); sendRaw(m); }); }
     // waits until the server said hello (or gives up after a while: then the game runs without it)
     const ready = ms => new Promise(res => { if (welcomed) { res(true); return; } readyQ.push(() => res(true)); setTimeout(() => res(welcomed), ms); });
-    accReq = m => req(m);
+    accReq = m => req(m); setMaint = (on, text) => req({ t: 'maint', on, text }).then(r => { maintOn = r.on; return r.on; });
     connect();
 
     const room = {
@@ -3733,7 +3753,7 @@ const Srv = (() => {
     if (/iPhone|iPad|iPod/.test(navigator.userAgent)) setTimeout(show, 4000);
     setInterval(() => { if (btn) btn.style.display = G.scene === 'lobby' && !UI.modal ? '' : 'none'; }, 700);
   }
-  return { client, url, app, logout, get account() { return acc; } };
+  return { client, url, app, logout, get account() { return acc; }, get maint() { return maintOn; }, setMaint: (on, text) => setMaint ? setMaint(on, text) : Promise.reject({ code: 'offline' }) };
 })();
 
 /* 60_net.js */
@@ -4271,6 +4291,7 @@ const UI = (() => {
         + '<div class="field"><label for="set_flash">Helle Blitze</label><select id="set_flash" data-set="flash">' + opt('1', 'An', s.flash === false ? '0' : '1') + opt('0', 'Aus (sanfter für die Augen)', s.flash === false ? '0' : '1') + '</select><span></span></div>'
         + '<div class="field"><label for="set_bots">Freie Plätze</label><select id="set_bots" data-set="bots">' + opt('1', 'Mit Bots auffüllen', s.bots ? '1' : '0') + opt('0', 'Leer lassen', s.bots ? '1' : '0') + '</select><span></span></div>'
         + '<div class="keys"><kbd>W A S D</kbd><span>Laufen (Handy: linker Daumen)</span><kbd>Maus ziehen</kbd><span>Kamera drehen, Mausrad zoomt (Handy: rechter Daumen, zwei Finger zoomen)</span><kbd>Leertaste</kbd><span>Springen</span><kbd>1 – 5</kbd><span>Turm aus dem Bau-Menü setzen</span><kbd>Q</kbd><span>Auswahl verbessern</span><kbd>X</kbd><span>Turm verkaufen</span><kbd>R</kbd><span>Tür reparieren</span><kbd>F</kbd><span>ULTI auslösen (lädt sich durch besiegte Zombies auf)</span><kbd>T</kbd><span>Emotes: Tanzen, Winken, Jubeln … (oder der Smiley-Knopf)</span><kbd>E</kbd><span>Benutzen</span></div>'
+        + (window.ZNS_SERVER && G.inf ? '<div class="field"><label>Wartung</label><b style="align-self:center">' + (Srv.maint ? 'AN – nur du kommst rein' : 'aus') + '</b><button class="mb ' + (Srv.maint ? '' : 'red') + '" data-act="maint">' + (Srv.maint ? 'Server wieder öffnen' : 'Server abschalten') + '</button></div>' : '')
         + (Srv.account ? '<div class="field"><label>Konto</label><b style="align-self:center">' + esc(Srv.account) + '</b><button class="mb alt" data-act="logout">Abmelden</button></div>' : '')
         + (Game.M ? '<div class="row ctr"><button class="mb red" data-act="leave">Runde verlassen</button></div>' : '') };
     },
@@ -4374,6 +4395,7 @@ const UI = (() => {
       case 'cedit': Clan.edit({ motto: cform.motto || (Clan.mine() || {}).motto, c: cform.c }); Sfx.play('claim'); toast({ t: 'Gespeichert.', c: '#35e04f' }); render(); break;
       case 'cdisband': if (!confirmT || G.time - confirmT > 3) { confirmT = G.time; deny('Nochmal tippen zum Auflösen.'); break; } confirmT = 0; Clan.disband(); tab.clans = 'find'; render(); break;
       case 'ach': { const a2 = ACH.find(x => x.id === v); if (!a2 || P.ach[v]) break; const g = a2.get(P); if (g[0] < g[1]) break; P.ach[v] = 1; grant(a2.rw); Save.commit(); Sfx.play('claim'); toast({ t: 'Abzeichen abgeholt: ' + rewardText(a2.rw), c: '#ffc42e' }); render(); break; }
+      case 'maint': Srv.setMaint(!Srv.maint, '').then(on => { UI.toast({ t: on ? 'Wartung an: alle anderen Spieler sind jetzt draußen.' : 'Server ist wieder offen.', c: '#ffc42e' }); render(); }, () => UI.toast({ t: 'Das ging nicht.', c: '#ff7a6a' })); break;
       case 'logout': Save.flush(); Srv.logout(); break;
       case 'adwatch': Ads.watch().then(() => render()); break;
       case 'daily': { if (P.daily.last === today()) break; const d = new Date(); d.setDate(d.getDate() - 1); const y = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate(); const idx = (P.daily.last === y ? P.daily.streak : 0) % 7, rw = DAILY[idx]; P.daily.streak = (P.daily.last === y ? P.daily.streak : 0) + 1; P.daily.last = today(); grant(rw); Save.commit(); Sfx.play('claim'); toast({ t: 'Tagesbelohnung: ' + rewardText(rw), c: '#38e8e0' }); if (rw.egg) hatchEgg(EGGS.find(e => e.id === rw.egg), true); else render(); break; }
