@@ -149,6 +149,17 @@ wss.on('connection', (ws, req) => {
 const ACC_RE = /^[A-Za-z0-9_äöüÄÖÜß]{3,16}$/, tries = new Map();
 const accPath = n => '_acc/' + n.toLowerCase(), tokPath = t => '_tok/' + crypto.createHash('sha256').update('t:' + t).digest('base64url');
 const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 32).toString('base64');
+// the player's browser keeps a signed copy of his account; should the server ever lose its data, the account comes back from there
+const ACC_KEY = process.env.ACCOUNT_SECRET || ADMIN;
+const recSig = r => crypto.createHmac('sha256', 'acc:' + ACC_KEY).update([r.n, r.s, r.h, r.u].join('|')).digest('base64url');
+const makeRec = a => { if (!ACC_KEY) return null; const r = { n: a.name, s: a.salt, h: a.hash, u: a.uid }; r.sig = recSig(r); return r; };
+function restore(r, tok) {
+  if (!ACC_KEY || !r || typeof r !== 'object' || [r.n, r.s, r.h, r.u, r.sig].some(v => typeof v !== 'string' || v.length > 200) || !ACC_RE.test(r.n)) return null;
+  const g = Buffer.from(recSig(r)), h = Buffer.from(r.sig); if (g.length !== h.length || !crypto.timingSafeEqual(g, h)) return null;
+  const a = docs.get(accPath(r.n)); if (a && a.uid !== r.u) return null; // the name belongs to somebody else now
+  if (!a) { docs.set(accPath(r.n), { name: r.n, salt: r.s, hash: r.h, uid: r.u, t: Date.now() }); touch(accPath(r.n)); log('Konto wiederhergestellt:', r.n); }
+  docs.set(tokPath(tok), { uid: r.u, user: r.n, t: Date.now() }); touch(tokPath(tok)); return { uid: r.u, user: r.n };
+}
 function tooMany(ip) { const now = Date.now(), a = (tries.get(ip) || []).filter(t => now - t < 10 * 60 * 1000); tries.set(ip, a); return a.length >= 15; }
 function newToken(uid, user) { const t = crypto.randomBytes(24).toString('base64url'); docs.set(tokPath(t), { uid, user, t: Date.now() }); touch(tokPath(t)); return t; }
 function account(c, m, reply) {
@@ -160,15 +171,15 @@ function account(c, m, reply) {
   if (m.t === 'register') { if (a) return reply({ ok: false, code: 'taken' });
     const owned = Array.from(docs.entries()).some(([k, v]) => k.startsWith('_acc/') && v.uid === c.uid);
     if (owned) return reply({ ok: false, code: 'has_account' });
-    const salt = crypto.randomBytes(16).toString('base64'); docs.set(accPath(user), { name: user, salt, hash: hashPw(pw, salt), uid: c.uid, t: Date.now() }); touch(accPath(user)); log('Neues Konto:', user);
-    return reply({ ok: true, tok: newToken(c.uid, user), user }); }
+    const salt = crypto.randomBytes(16).toString('base64'); const na = { name: user, salt, hash: hashPw(pw, salt), uid: c.uid, t: Date.now() }; docs.set(accPath(user), na); touch(accPath(user)); log('Neues Konto:', user);
+    return reply({ ok: true, tok: newToken(c.uid, user), user, rec: makeRec(na) }); }
   if (!a) return reply({ ok: false, code: 'wrong' });
   const h = Buffer.from(hashPw(pw, a.salt)), g = Buffer.from(a.hash); if (h.length !== g.length || !crypto.timingSafeEqual(h, g)) return reply({ ok: false, code: 'wrong' });
-  return reply({ ok: true, tok: newToken(a.uid, a.name), user: a.name });
+  return reply({ ok: true, tok: newToken(a.uid, a.name), user: a.name, rec: makeRec(a) });
 }
 function hello(c, m) {
   c.uid = crypto.createHash('sha256').update('zns:' + m.key).digest('base64url').slice(0, 20); c.user = null;
-  if (typeof m.tok === 'string' && m.tok.length < 80) { const t = docs.get(tokPath(m.tok)); if (t && t.uid) { c.uid = t.uid; c.user = t.user || null; } }
+  if (typeof m.tok === 'string' && m.tok.length < 80) { const t = docs.get(tokPath(m.tok)); if (t && t.uid) { c.uid = t.uid; c.user = t.user || null; } else { const r = restore(m.acc, m.tok); if (r) { c.uid = r.uid; c.user = r.user; } } }
   if (ADMIN && typeof m.admin === 'string' && m.admin.length >= 4 && crypto.timingSafeEqual(crypto.createHash('sha256').update(m.admin).digest(), crypto.createHash('sha256').update(ADMIN).digest())) { owners.add(c.uid); touch('_owners'); log('Neuer Besitzer:', c.uid); }
   c.owner = owners.has(c.uid);
   if (upd) { send(c, { t: 'maint', why: 'update' }); c.ws.close(4003, 'update'); return; }
